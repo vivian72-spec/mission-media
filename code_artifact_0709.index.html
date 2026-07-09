@@ -1,0 +1,622 @@
+import React, { useState, useRef } from 'react';
+import { Upload, FileSpreadsheet, RotateCcw, AlertCircle, Play, ExternalLink, Download, Target, Shuffle, Archive, X } from 'lucide-react';
+
+// --- 穩定的 CSV 解析器 (支援 Excel 匯出的含引號及換行格式) ---
+const csvToArray = (strData, strDelimiter = ",") => {
+  const objPattern = new RegExp((
+    "(\\" + strDelimiter + "|\\r?\\n|\\r|^)" +
+    "(?:\"([^\"]*(?:\"\"[^\"]*)*)\"|" +
+    "([^\"\\" + strDelimiter + "\\r\\n]*))"
+  ), "gi");
+  let arrData = [[]];
+  let arrMatches = null;
+  while (arrMatches = objPattern.exec(strData)) {
+    let strMatchedDelimiter = arrMatches[1];
+    if (strMatchedDelimiter.length && strMatchedDelimiter !== strDelimiter) {
+      arrData.push([]);
+    }
+    let strMatchedValue;
+    if (arrMatches[2]) {
+      strMatchedValue = arrMatches[2].replace(new RegExp("\"\"", "g"), "\"");
+    } else {
+      strMatchedValue = arrMatches[3];
+    }
+    arrData[arrData.length - 1].push(strMatchedValue);
+  }
+  if (arrData.length > 0 && arrData[arrData.length - 1].length === 1 && arrData[arrData.length - 1][0] === "") {
+    arrData.pop();
+  }
+  return arrData;
+};
+
+// 洗牌演算法
+const shuffleArray = (array) => {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+  }
+  return newArray;
+};
+
+export default function App() {
+  const [gameState, setGameState] = useState('setup');
+  const [decks, setDecks] = useState({ 社會: [], 經濟: [], 環境: [] });
+  const [initialDecks, setInitialDecks] = useState({ 社會: [], 經濟: [], 環境: [] });
+  const [discardPile, setDiscardPile] = useState([]); // 新增：已解讀卡牌堆
+  const [showHistoryList, setShowHistoryList] = useState(false); // 新增：控制歷史紀錄視窗
+  
+  const [activeCard, setActiveCard] = useState(null);
+  const [cardMode, setCardMode] = useState('play'); // 'play' 或 'history'
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const fileInputRef = useRef(null);
+
+  // 下載上傳範例 (改為 Excel 格式)
+  const downloadTemplate = () => {
+    const tableHtml = `
+      <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="UTF-8">
+        <!--[if gte mso 9]>
+        <xml>
+          <x:ExcelWorkbook>
+            <x:ExcelWorksheets>
+              <x:ExcelWorksheet>
+                <x:Name>新聞資訊卡題庫</x:Name>
+                <x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
+              </x:ExcelWorksheet>
+            </x:ExcelWorksheets>
+          </x:ExcelWorkbook>
+        </xml>
+        <![endif]-->
+        <style>
+          th { background-color: #4f46e5; color: white; font-weight: bold; height: 30px; text-align: left; padding: 5px; }
+          td { height: 25px; text-align: left; padding: 5px; vertical-align: top; }
+        </style>
+      </head>
+      <body>
+        <table border="1">
+          <tr>
+            <th>新聞類型</th>
+            <th>新聞標題</th>
+            <th>新聞內容</th>
+            <th>解答</th>
+            <th>新聞連結</th>
+          </tr>
+          <tr>
+            <td>社會</td>
+            <td>國際組織介入 童工權益獲得全面保護</td>
+            <td>某國多間成衣廠違法雇用童工，逼迫孩童超時工作且沒有給出符合基本工資的薪水。在國際組織的規範設置與嚴格監督下，此國童工的權益已完全受到保護，沒有公共安全或勞工權益的問題出現。</td>
+            <td>這是一則假新聞！正確資訊如下：某國多間成衣廠違法雇用童工，逼迫孩童超時工作且沒有給出符合基本工資的薪水。即便某國際組織因此進行了規範設置與嚴格監督，目前童工權益問題還是存在於國內。</td>
+            <td>https://www.thenewslens.com/article/81662</td>
+          </tr>
+          <tr>
+            <td>經濟</td>
+            <td>公平貿易新承諾：服飾品牌的人道永續方案</td>
+            <td>某知名服飾品牌宣布未來所有原料皆會使用公平貿易認證材料，致力於改善開發中國家農民的生活。</td>
+            <td>這是一則真實新聞！正確資訊如下：該品牌確實已簽署公平貿易協議，並啟動了五年計畫來轉型供應鏈。</td>
+            <td>https://example.com/news1</td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `;
+    
+    const blob = new Blob([tableHtml], { type: 'application/vnd.ms-excel' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", "新聞資訊卡_上傳模板.xls");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // 處理檔案上傳
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target.result;
+        const data = csvToArray(text);
+        
+        if (data.length < 2) {
+          setErrorMsg("檔案內容太空囉，請確認是否包含標題與題目資料。");
+          return;
+        }
+
+        const headers = data[0].map(h => h ? h.replace(/\n|\r/g, "").trim() : "");
+        
+        const idxType = headers.findIndex(h => h.includes("新聞類型") || h.includes("議題種類"));
+        const idxTitle = headers.findIndex(h => h.includes("新聞標題"));
+        const idxDesc = headers.findIndex(h => h.includes("新聞內容") || h.includes("內容敘述"));
+        const idxAnswer = headers.findIndex(h => h.includes("解答"));
+        const idxLink = headers.findIndex(h => h.includes("新聞連結"));
+
+        if (idxType === -1 || idxAnswer === -1) {
+          setErrorMsg(`缺少必要的欄位！請確認您的表格第一列是否包含「新聞類型」與「解答」。`);
+          return;
+        }
+
+        const parsedCards = { 社會: [], 經濟: [], 環境: [] };
+
+        for (let i = 1; i < data.length; i++) {
+          const row = data[i];
+          if (row.length < 2) continue; 
+          
+          const type = row[idxType]?.trim();
+          
+          if (['社會', '經濟', '環境'].includes(type)) {
+            parsedCards[type].push({
+              id: `${type}-${i}`,
+              type: type,
+              title: idxTitle >= 0 ? row[idxTitle]?.trim() : "",
+              description: idxDesc >= 0 ? row[idxDesc]?.trim() : "",
+              answer: row[idxAnswer]?.trim(),
+              link: idxLink >= 0 ? row[idxLink]?.trim() : "",
+            });
+          }
+        }
+
+        const finalDecks = {
+          社會: shuffleArray(parsedCards['社會']).slice(0, 7),
+          經濟: shuffleArray(parsedCards['經濟']).slice(0, 7),
+          環境: shuffleArray(parsedCards['環境']).slice(0, 7),
+        };
+
+        if (finalDecks['社會'].length === 0 && finalDecks['經濟'].length === 0 && finalDecks['環境'].length === 0) {
+            setErrorMsg("找不到任何有效的題目，請確認「新聞類型」欄位填寫的是純文字的「社會」、「經濟」或「環境」。");
+            return;
+        }
+
+        setInitialDecks(finalDecks);
+        setDecks(finalDecks);
+        setDiscardPile([]); // 初始化歸檔牌堆
+        setErrorMsg("");
+        setGameState('playing');
+
+      } catch (err) {
+        setErrorMsg("解析檔案時發生錯誤，請確認上傳的是正確的 CSV 檔案。");
+        console.error(err);
+      }
+    };
+    reader.readAsText(file, 'UTF-8'); 
+  };
+
+  // 抽牌邏輯
+  const drawCard = (type) => {
+    if (decks[type].length === 0) return;
+    const newDecks = { ...decks };
+    const drawnCard = newDecks[type].pop();
+    
+    setDecks(newDecks);
+    setCardMode('play');
+    setActiveCard(drawnCard);
+    setIsFlipped(false);
+  };
+
+  // 放回牌堆 (未解讀直接放回)
+  const returnToDeck = () => {
+    if (!activeCard) return;
+    const newDecks = { ...decks };
+    // 將卡牌加回去後，將該疊牌重新洗牌
+    newDecks[activeCard.type] = shuffleArray([...newDecks[activeCard.type], activeCard]);
+    setDecks(newDecks);
+    
+    setIsFlipped(false);
+    setTimeout(() => setActiveCard(null), 300);
+  };
+
+  // 確認並歸檔 (已解讀完成，放入歷史牌堆)
+  const markAsRead = () => {
+    if (!activeCard) return;
+    setDiscardPile(prev => [...prev, activeCard]);
+    setIsFlipped(false);
+    setTimeout(() => setActiveCard(null), 300);
+  };
+
+  // 關閉歷史卡牌檢視
+  const closeHistoryCard = () => {
+    setIsFlipped(false);
+    setTimeout(() => setActiveCard(null), 300);
+  };
+
+  const getDeckColor = (type) => {
+    switch(type) {
+      case '社會': return 'bg-orange-500 hover:bg-orange-600 border-orange-700 text-orange-600';
+      case '經濟': return 'bg-blue-500 hover:bg-blue-600 border-blue-700 text-blue-600';
+      case '環境': return 'bg-emerald-500 hover:bg-emerald-600 border-emerald-700 text-emerald-600';
+      default: return 'bg-gray-500 text-gray-500';
+    }
+  };
+
+  // 重新洗牌
+  const handleReshuffle = () => {
+    setDecks({
+      社會: shuffleArray(initialDecks['社會']),
+      經濟: shuffleArray(initialDecks['經濟']),
+      環境: shuffleArray(initialDecks['環境']),
+    });
+    setDiscardPile([]); // 清空已解讀紀錄
+  };
+
+  // 重新設定 (回首頁)
+  const handleReset = () => {
+    setGameState('setup');
+    setActiveCard(null);
+    setDecks({ 社會: [], 經濟: [], 環境: [] });
+    setInitialDecks({ 社會: [], 經濟: [], 環境: [] });
+    setDiscardPile([]);
+    setShowHistoryList(false);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-900 text-slate-100 font-sans selection:bg-indigo-500/30">
+      
+      <header className="bg-slate-800 border-b border-slate-700 p-4 shadow-md flex justify-between items-center z-10 relative">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center font-bold text-xl shadow-lg shadow-indigo-500/20">
+            W
+          </div>
+          <h1 className="text-xl md:text-2xl font-bold tracking-wider">國際總動援 <span className="font-light text-slate-400 text-sm md:text-base ml-2">新聞資訊卡系統</span></h1>
+        </div>
+        
+        {/* 重新設定按鈕：退回不顯眼的右上角 */}
+        {gameState === 'playing' && (
+          <button 
+            onClick={handleReset}
+            className="flex items-center gap-2 px-3 py-1.5 bg-slate-700/50 hover:bg-slate-600 text-slate-400 hover:text-white rounded-md transition-colors text-xs md:text-sm font-medium border border-slate-600"
+            title="清空資料並回到上傳頁面"
+          >
+            <RotateCcw size={14} />
+            <span className="hidden sm:inline">重新設定</span>
+          </button>
+        )}
+      </header>
+
+      <main className="max-w-6xl mx-auto p-6 md:p-12 relative h-[calc(100vh-80px)]">
+        
+        {/* --- 狀態 1：設定/上傳畫面 --- */}
+        {gameState === 'setup' && (
+          <div className="flex flex-col items-center justify-center h-full animate-in fade-in zoom-in duration-500">
+            <div className="bg-slate-800 p-8 md:p-12 rounded-2xl shadow-2xl border border-slate-700 max-w-2xl w-full text-center">
+              <div className="w-20 h-20 bg-indigo-500/20 text-indigo-400 rounded-full flex items-center justify-center mx-auto mb-6">
+                <FileSpreadsheet size={40} />
+              </div>
+              <h2 className="text-3xl font-bold mb-4">匯入您的專屬題庫</h2>
+              <p className="text-slate-400 mb-8 leading-relaxed">
+                請上傳您的「新聞資訊卡.csv」檔案。<br/>系統會自動讀取並洗牌，組成「社會、經濟、環境」各最多 7 張的牌庫。
+              </p>
+              
+              <div className="bg-slate-900 rounded-lg p-5 text-left mb-8 border border-slate-700">
+                <div className="flex justify-between items-start mb-3">
+                  <h3 className="font-semibold text-indigo-300 flex items-center gap-2">
+                    <AlertCircle size={18} /> 上傳步驟與欄位格式：
+                  </h3>
+                  <button 
+                    onClick={downloadTemplate}
+                    className="text-sm flex items-center gap-1 text-indigo-400 hover:text-indigo-300 transition-colors bg-indigo-500/10 px-3 py-1.5 rounded-full border border-indigo-500/20"
+                  >
+                    <Download size={14} /> 下載 Excel 公版範例
+                  </button>
+                </div>
+                <code className="text-sm text-slate-300 block bg-slate-950 p-3 rounded mb-3">
+                  新聞類型, 新聞標題, 新聞內容, 解答, 新聞連結
+                </code>
+                <ul className="text-sm text-slate-500 space-y-2 list-disc list-inside">
+                  <li><strong className="text-slate-300">第一步：</strong>點擊右上角下載 Excel 範例並填寫內容。<br/><span className="ml-5 text-slate-400">（註：新聞類型限填「社會」、「經濟」、「環境」）</span></li>
+                  <li><strong className="text-slate-300">第二步：</strong>填寫完畢後，在 Excel 中點選「另存新檔」，格式選擇 <strong className="text-indigo-400">CSV UTF-8 (逗號分隔)</strong>。</li>
+                  <li><strong className="text-slate-300">第三步：</strong>將存好的 CSV 檔案上傳至本系統即可開始遊戲。</li>
+                </ul>
+              </div>
+
+              {errorMsg && (
+                <div className="mb-6 p-4 bg-red-500/10 border border-red-500/50 rounded-lg text-red-400 text-sm flex items-start gap-2 text-left">
+                  <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                  <span>{errorMsg}</span>
+                </div>
+              )}
+
+              <input 
+                type="file" 
+                accept=".csv"
+                className="hidden"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+              />
+              <button 
+                onClick={() => fileInputRef.current.click()}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white px-8 py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-3 w-full"
+              >
+                <Upload size={24} />
+                點擊上傳題庫檔案
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* --- 狀態 2：遊戲/抽牌畫面 --- */}
+        {gameState === 'playing' && (
+          <div className="h-full flex flex-col justify-center animate-in fade-in duration-700">
+            <h2 className="text-center text-2xl md:text-3xl font-bold text-slate-300 mb-12 tracking-widest">
+              請選擇要判讀的新聞類別
+            </h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-4xl mx-auto w-full">
+              {['社會', '經濟', '環境'].map((type) => {
+                const count = decks[type].length;
+                const isEmpty = count === 0;
+                
+                return (
+                  <div key={type} className="flex flex-col items-center group">
+                    <button
+                      onClick={() => drawCard(type)}
+                      disabled={isEmpty}
+                      className={`
+                        relative w-48 h-72 rounded-xl shadow-2xl transition-all duration-300
+                        flex flex-col items-center justify-center border-b-8 border-r-4
+                        ${isEmpty ? 'bg-slate-800 border-slate-900 opacity-50 cursor-not-allowed grayscale' : `${getDeckColor(type).split(' ')[0]} ${getDeckColor(type).split(' ')[1]} ${getDeckColor(type).split(' ')[2]} hover:-translate-y-4 hover:shadow-3xl`}
+                      `}
+                    >
+                      <div className="absolute inset-2 border-2 border-white/20 rounded-lg pointer-events-none"></div>
+                      <div className="absolute inset-4 border border-white/10 rounded pointer-events-none"></div>
+                      
+                      <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center mb-4 backdrop-blur-sm">
+                        <span className="text-3xl font-black text-white shadow-sm">{type[0]}</span>
+                      </div>
+                      <span className="text-2xl font-bold text-white tracking-widest">{type}新聞</span>
+                      
+                      {!isEmpty && (
+                         <div className="absolute -top-3 -right-3 w-8 h-8 bg-slate-800 text-white rounded-full flex items-center justify-center font-bold border-2 border-slate-600 shadow-lg z-10 group-hover:scale-110 transition-transform">
+                           {count}
+                         </div>
+                      )}
+                      
+                      {!isEmpty && count > 1 && (
+                        <>
+                          <div className={`absolute -bottom-2 -right-1 w-full h-full rounded-xl -z-10 opacity-60 ${getDeckColor(type).split(' ')[0]}`}></div>
+                          <div className={`absolute -bottom-4 -right-2 w-full h-full rounded-xl -z-20 opacity-30 ${getDeckColor(type).split(' ')[0]}`}></div>
+                        </>
+                      )}
+                    </button>
+                    
+                    {isEmpty && (
+                      <span className="mt-6 font-medium text-slate-500 bg-slate-800 px-4 py-1 rounded-full text-sm">
+                        卡牌已抽完
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 底部控制按鈕區：重新洗牌 & 已解讀卡牌堆 */}
+            <div className="mt-16 flex justify-center gap-4 sm:gap-8 animate-in slide-in-from-bottom-4 duration-500 delay-300 w-full px-4">
+              <button 
+                onClick={handleReshuffle}
+                className="flex-1 max-w-[200px] flex flex-col items-center justify-center gap-2 px-4 py-4 bg-indigo-600 hover:bg-indigo-500 rounded-2xl font-bold transition-all shadow-lg shadow-indigo-600/30 text-white hover:-translate-y-1"
+              >
+                <Shuffle size={24} />
+                <span className="text-center">重新洗牌<br/><span className="text-xs font-normal opacity-80">恢復初始牌堆</span></span>
+              </button>
+              
+              <button 
+                onClick={() => setShowHistoryList(true)}
+                className="relative flex-1 max-w-[200px] flex flex-col items-center justify-center gap-2 px-4 py-4 bg-slate-700 hover:bg-slate-600 rounded-2xl font-bold transition-all shadow-lg border border-slate-600 text-slate-200 hover:-translate-y-1"
+              >
+                <Archive size={24} />
+                <span className="text-center">已解讀卡牌<br/><span className="text-xs font-normal opacity-80">翻閱歷史紀錄</span></span>
+                {discardPile.length > 0 && (
+                  <div className="absolute -top-3 -right-3 bg-red-500 text-white rounded-full w-8 h-8 flex items-center justify-center text-sm font-bold shadow-lg border-2 border-slate-700 animate-in zoom-in">
+                    {discardPile.length}
+                  </div>
+                )}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* --- 彈出層：歷史紀錄列表清單 --- */}
+        {showHistoryList && !activeCard && (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in">
+            <div className="bg-slate-800 rounded-2xl shadow-2xl border border-slate-700 max-w-4xl w-full max-h-[85vh] flex flex-col overflow-hidden">
+              
+              <div className="p-6 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
+                <h3 className="text-xl md:text-2xl font-bold text-white flex items-center gap-3">
+                  <Archive size={24} className="text-indigo-400" /> 已解讀新聞歸檔
+                </h3>
+                <button 
+                  onClick={() => setShowHistoryList(false)} 
+                  className="text-slate-400 hover:text-white transition-colors bg-slate-700 hover:bg-slate-600 p-2 rounded-lg"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="p-6 overflow-y-auto flex-grow bg-slate-900/50">
+                {discardPile.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center h-48 text-slate-500 gap-3">
+                    <Archive size={48} className="opacity-20" />
+                    <p>目前還沒有解讀過的卡牌喔！</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                    {discardPile.map((card, idx) => (
+                      <button 
+                        key={idx} 
+                        onClick={() => { 
+                          setCardMode('history'); 
+                          setActiveCard(card); 
+                          setIsFlipped(false); // 預設先顯示正面
+                        }}
+                        className="bg-slate-800 hover:bg-slate-700 p-5 rounded-xl border border-slate-700 hover:border-indigo-500 text-left transition-all hover:-translate-y-1 hover:shadow-lg group flex flex-col gap-3"
+                      >
+                        <div className="flex justify-between items-center">
+                           <span className={`text-xs font-bold px-2 py-1 rounded-md text-white ${getDeckColor(card.type).split(' ')[0]}`}>
+                            {card.type}
+                          </span>
+                          <span className="text-xs font-mono text-slate-500 group-hover:text-indigo-400">查看詳情 &rarr;</span>
+                        </div>
+                        <p className="font-medium text-slate-200 line-clamp-3 leading-relaxed">
+                          {card.title || "未提供新聞標題"}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- 彈出層：卡牌展示 (含 3D 翻轉效果) --- */}
+        {activeCard && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in">
+            
+            <div className="relative w-full max-w-md h-[36rem] [perspective:1000px]">
+              <div className={`w-full h-full transition-all duration-700 [transform-style:preserve-3d] ${isFlipped ? '[transform:rotateY(180deg)]' : ''}`}>
+                
+                {/* --- 卡牌正面 (新聞內容與獎勵) --- */}
+                <div className="absolute w-full h-full [backface-visibility:hidden]">
+                  <div className={`w-full h-full rounded-2xl shadow-2xl flex flex-col bg-slate-100 text-slate-800 overflow-hidden border-t-8 ${getDeckColor(activeCard.type).split(' ')[2].replace('border-', 'border-t-')}`}>
+                    
+                    <div className="p-6 pb-4 border-b border-slate-200 bg-white relative">
+                      <div className="flex justify-between items-center mb-3">
+                        <span className={`px-3 py-1 rounded-full text-xs font-bold text-white tracking-wider ${getDeckColor(activeCard.type).split(' ')[0]}`}>
+                          {activeCard.type}
+                        </span>
+                        {cardMode === 'history' && (
+                           <span className="absolute top-4 right-4 bg-slate-200 text-slate-500 px-2 py-1 rounded text-xs font-bold flex items-center gap-1">
+                             <Archive size={12}/> 歷史紀錄
+                           </span>
+                        )}
+                        {cardMode === 'play' && (
+                           <span className="text-slate-400 text-sm font-mono tracking-wider">NEWS CARD</span>
+                        )}
+                      </div>
+                      <h3 className="text-xl md:text-2xl font-bold leading-snug text-slate-800">
+                        {activeCard.title || "未提供新聞標題"}
+                      </h3>
+                    </div>
+                    
+                    <div className="p-6 flex-grow overflow-y-auto bg-slate-50 flex flex-col justify-between">
+                      <p className="leading-relaxed whitespace-pre-wrap text-lg text-slate-600 mb-6">
+                        {activeCard.description || "未提供新聞內容"}
+                      </p>
+                      
+                      <div className="mt-auto p-4 bg-amber-50 rounded-xl border border-amber-200 shadow-sm">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Target size={20} className="text-amber-500" />
+                          <span className="text-amber-700 font-bold tracking-wide">任務指示與獎勵</span>
+                        </div>
+                        <p className="text-amber-800 text-sm leading-relaxed font-medium">
+                          請判讀此新聞事件，若判讀正確，可獲得 1 個<strong className={`mx-1 text-base ${getDeckColor(activeCard.type).split(' ')[3]}`}>「{activeCard.type}」</strong>行動指數。
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="p-4 bg-white border-t border-slate-200 flex justify-between gap-3">
+                      {cardMode === 'play' ? (
+                        <>
+                          <button 
+                            onClick={returnToDeck}
+                            className="flex-1 py-3 px-4 rounded-lg font-bold text-slate-500 bg-slate-200 hover:bg-slate-300 transition-colors"
+                          >
+                            放回牌堆
+                          </button>
+                          <button 
+                            onClick={() => setIsFlipped(true)}
+                            className="flex-1 py-3 px-4 rounded-lg font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition-colors shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
+                          >
+                            <Play size={18} fill="currentColor" />
+                            我要對答案
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button 
+                            onClick={closeHistoryCard}
+                            className="flex-1 py-3 px-4 rounded-lg font-bold text-slate-500 bg-slate-200 hover:bg-slate-300 transition-colors"
+                          >
+                            關閉
+                          </button>
+                          <button 
+                            onClick={() => setIsFlipped(true)}
+                            className="flex-1 py-3 px-4 rounded-lg font-bold text-white bg-slate-700 hover:bg-slate-600 transition-colors shadow-lg flex items-center justify-center gap-2"
+                          >
+                            查看解答
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* --- 卡牌背面 (互動式解答與連結) --- */}
+                <div className="absolute w-full h-full [backface-visibility:hidden] [transform:rotateY(180deg)]">
+                   <div className="w-full h-full rounded-2xl shadow-2xl flex flex-col bg-slate-800 text-slate-100 overflow-hidden border-2 border-indigo-500/50 relative">
+                    
+                    <div className="absolute inset-0 opacity-10 pointer-events-none">
+                       <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2"></div>
+                       <div className="absolute bottom-0 left-0 w-64 h-64 bg-emerald-500 rounded-full blur-3xl translate-y-1/2 -translate-x-1/2"></div>
+                    </div>
+
+                    <div className="p-8 flex flex-col items-center justify-center flex-grow z-10 w-full">
+                      <span className="text-indigo-400 text-sm font-bold tracking-widest mb-6">判讀結果</span>
+                      
+                      <div className="bg-slate-900/60 p-6 rounded-2xl border border-slate-700 w-full overflow-y-auto max-h-64 shadow-inner">
+                        <p className="text-lg md:text-xl font-medium leading-relaxed text-slate-200 text-left whitespace-pre-wrap">
+                          {activeCard.answer || "未提供解答"}
+                        </p>
+                      </div>
+
+                      {activeCard.link && (
+                        <div className="mt-6 w-full flex flex-col items-center">
+                          <p className="text-slate-400 text-sm mb-3">其他內容請參考新聞連結：</p>
+                          <a 
+                            href={activeCard.link} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="w-full px-6 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-indigo-300 flex justify-center items-center gap-2 transition-colors border border-slate-600 hover:border-indigo-400 font-medium"
+                          >
+                            <ExternalLink size={18} />
+                            點擊查看完整報導
+                          </a>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="p-4 border-t border-slate-700 z-10 bg-slate-900/50 flex gap-3">
+                      {cardMode === 'play' ? (
+                        <button 
+                          onClick={markAsRead}
+                          className="w-full py-4 rounded-xl font-bold text-white bg-indigo-600 hover:bg-indigo-500 transition-colors shadow-lg shadow-indigo-600/20 flex justify-center gap-2"
+                        >
+                          <Archive size={20} /> 確認並歸檔
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={closeHistoryCard}
+                          className="w-full py-4 rounded-xl font-bold text-white bg-slate-700 hover:bg-slate-600 transition-colors shadow-lg"
+                        >
+                          關閉卡牌
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+    </div>
+  );
+}
